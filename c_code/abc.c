@@ -245,7 +245,7 @@ int main() {
     double fiducial_beta = 0.2, fiducial_gamma = 0.03;
     int n_iterations = 10000;      // number of accepted samples to collect
     
-    int eps_list[] = {20, 18, 16, 14, 10, 6, 5, 3, 2, 1, 0.5, 0.1};;
+    int eps_list[] = {20, 18, 16, 14, 10, 6, 5, 3, 2, 1};;
     int eps_list_length = sizeof(eps_list) / sizeof(eps_list[0]);
     
     // #pragma omp parallel for num_threads(2)
