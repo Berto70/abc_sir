@@ -69,19 +69,26 @@ void summary(const double *data, size_t n, double out[2]) {
     out[1] = p90 - p10;
 }
 
+// Compute Euclidean norm difference between two int arrays.
+double compute_norm(int *a, int *b, int n) {
+    double sum = 0;
+    for (int i = 0; i < n; i++) {
+        double diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    return sqrt(sum);
+}
+
 // Distance: computes L2 norm differences for S, I, R arrays.
 double distance(int N, int ndays, const double *obs_S, const double *obs_I, 
                 const double *obs_R, const double *sim_S, const double *sim_I, 
                 const double *sim_R) {
     double sumS = 0.0, sumI = 0.0, sumR = 0.0;
-    for (int i = 0; i < ndays; i++) {
-        double diffS = sim_S[i] - obs_S[i];
-        double diffI = sim_I[i] - obs_I[i];
-        double diffR = sim_R[i] - obs_R[i];
-        sumS += diffS * diffS;
-        sumI += diffI * diffI;
-        sumR += diffR * diffR;
-    }
+    
+    sumS = compute_norm(sim_S, obs_S, ndays);
+    sumI = compute_norm(sim_I, obs_I, ndays);
+    sumR = compute_norm(sim_R, obs_R, ndays);
+
     double d_S = sqrt(sumS) / N;
     double d_I = sqrt(sumI) / N;
     double d_R = sqrt(sumR) / N;
