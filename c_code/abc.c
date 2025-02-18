@@ -21,11 +21,6 @@ double sample_exponential(double scale) {
     return gsl_ran_exponential(r, scale);
 }
 
-// Box-Muller transform for standard normal sample replaced by GSL Gaussian.
-double sample_normal() {
-    return gsl_ran_gaussian(r, 1.0);
-}
-
 // Sample from Gamma distribution using GSL.
 double sample_gamma(double shape, double scale) {
     return gsl_ran_gamma(r, shape, scale);
@@ -92,8 +87,8 @@ void summary(double *data, int n, double *median, double *spread) {
         tmp[i] = data[i];
     gsl_sort(tmp, 1, n);
     *median = gsl_stats_median_from_sorted_data(tmp, 1, n);
-    double p90 = gsl_stats_quantile_from_sorted_data(tmp, 1, n, 0.875);
-    double p10 = gsl_stats_quantile_from_sorted_data(tmp, 1, n, 0.125);
+    double p90 = gsl_stats_quantile_from_sorted_data(tmp, 1, n, 0.90);
+    double p10 = gsl_stats_quantile_from_sorted_data(tmp, 1, n, 0.10);
     *spread = p90 - p10;
     free(tmp);
 }
@@ -420,9 +415,9 @@ int main() {
                 double gamma = sample_beta(beta_a, beta_b);
 
                 // Allocate arrays for simulation output.
-                int *sim_S = (int *)malloc(ndays * sizeof(int));
-                int *sim_I = (int *)malloc(ndays * sizeof(int));
-                int *sim_R = (int *)malloc(ndays * sizeof(int));
+                int *sim_S = malloc(ndays * sizeof(int));
+                int *sim_I = malloc(ndays * sizeof(int));
+                int *sim_R = malloc(ndays * sizeof(int));
 
                 simulator(beta, gamma, ndays, N, I0, sim_S, sim_I, sim_R);
 
