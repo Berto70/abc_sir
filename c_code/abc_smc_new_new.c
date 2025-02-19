@@ -157,7 +157,7 @@ void weight(int population_size, double beta_old, double beta_new,
 /* ---------------------------------------------------------------------
    Sample an index from an array of weights.
    --------------------------------------------------------------------- */
-int weighted_sample(gsl_rng *rng, const double *weights, int npart) {
+int weighted_sample(gsl_rng *rng, double *weights, int npart) {
     double r_uniform = gsl_rng_uniform(rng);
     double cum_sum = 0.0;
     for (int i = 0; i < npart; i++) {
@@ -202,10 +202,10 @@ void run_abc_smc(const int *obs_S, const int *obs_I, const int *obs_R,
     }
 
     // Temporary arrays to store epsilon thresholds when saving to CSV.
-    double *epsilons_S = malloc(population_size * sizeof(double));
-    double *epsilons_I = malloc(population_size * sizeof(double));
-    double *epsilons_R = malloc(population_size * sizeof(double));
-    if (!epsilons_S || !epsilons_I || !epsilons_R) {
+    double *epsilon_S = malloc(n_generations * sizeof(double));
+    double *epsilon_I = malloc(n_generations * sizeof(double));
+    double *epsilon_R = malloc(n_generations * sizeof(double));
+    if (!epsilon_S || !epsilon_I || !epsilon_R) {
         fprintf(stderr, "Error: failed to allocate memory for temporary epsilon arrays.\n");
         exit(EXIT_FAILURE);
     }
@@ -227,6 +227,11 @@ void run_abc_smc(const int *obs_S, const int *obs_I, const int *obs_R,
             for (int i = 0; i < population_size; i++) {
                 double beta = sample_exponential(exponent_scale);
                 double gamma = sample_beta(beta_a, beta_b);
+
+                // Check if beta and gamma are within boundaries
+                if (beta <= 0 || gamma <= 0 || gamma > 1)
+                    continue;
+
                 int *sim_S = malloc(ndays * sizeof(int));
                 int *sim_I = malloc(ndays * sizeof(int));
                 int *sim_R = malloc(ndays * sizeof(int));
@@ -243,6 +248,10 @@ void run_abc_smc(const int *obs_S, const int *obs_I, const int *obs_R,
                 distances_I[i] = d_I;
                 distances_R[i] = d_R;
 
+                epsilon_S[0] = compute_percentile(distances_S, population_size, 0.75);
+                epsilon_I[0] = compute_percentile(distances_I, population_size, 0.75);
+                epsilon_R[0] = compute_percentile(distances_R, population_size, 0.75);
+
                 particles_beta[i] = beta;
                 particles_gamma[i] = gamma;
                 // For generation 0, weights are uniform.
@@ -257,15 +266,20 @@ void run_abc_smc(const int *obs_S, const int *obs_I, const int *obs_R,
             // For subsequent generations, perturb particles using importance resampling.
             printf("Running Generation %02d ...\n", gen);
             for (int i = 0; i < population_size; i++) {
+                while(1) { 
                 // Resample indices based on previous weights.
-                int idx_beta = weighted_sample(r, weight_beta[i] + (gen - 1), population_size);
-                int idx_gamma = weighted_sample(r, weight_gamma[i] + (gen - 1), population_size);
+                int idx_beta = weighted_sample(r, &weight_beta[i][gen-1], population_size);
+                int idx_gamma = weighted_sample(r, &weight_gamma[i][gen-1], population_size);
                 double old_beta = particles_beta[idx_beta];
                 double old_gamma = particles_gamma[idx_gamma];
 
                 // Perturb the parameters.
                 double new_beta = old_beta + gsl_ran_gaussian(r, 0.01);
                 double new_gamma = old_gamma + gsl_ran_gaussian(r, 0.01);
+
+                // Check if beta and gamma are within boundaries
+                if (new_beta <= 0 || new_gamma <= 0 || new_gamma > 1)
+                    continue;
 
                 int *sim_S = malloc(ndays * sizeof(int));
                 int *sim_I = malloc(ndays * sizeof(int));
@@ -283,47 +297,53 @@ void run_abc_smc(const int *obs_S, const int *obs_I, const int *obs_R,
                 distances_R[i] = d_R;
 
                 // Accept the new particle if it meets the previous generation's thresholds.
-                if (d_S < epsilon_history[gen - 1][0] &&
-                    d_I < epsilon_history[gen - 1][1] &&
-                    d_R < epsilon_history[gen - 1][2]) {
+                if (d_S < epsilon_S[gen - 1] &&
+                    d_I < epsilon_I[gen - 1] &&
+                    d_R < epsilon_R[gen - 1]) {
                     particles_beta[i] = new_beta;
                     particles_gamma[i] = new_gamma;
                     weight(population_size, old_beta, new_beta, old_gamma, new_gamma,
                            exponent_scale, beta_a, beta_b,
                            weight_beta[idx_beta][gen - 1], weight_gamma[idx_gamma][gen - 1],
                            &weight_beta[i][gen], &weight_gamma[i][gen]);
-                } else {
-                    // If the particle is not accepted, set its weight to zero.
-                    particles_beta[i] = new_beta;
-                    particles_gamma[i] = new_gamma;
-                    weight_beta[i][gen] = 0;
-                    weight_gamma[i][gen] = 0;
+                // } else {
+                //     break;
+                //     // // If the particle is not accepted, set its weight to zero.
+                //     // particles_beta[i] = new_beta;
+                //     // particles_gamma[i] = new_gamma;
+                //     // weight_beta[i][gen] = 0;
+                //     // weight_gamma[i][gen] = 0;
+                // }
+                    free(sim_S);
+                    free(sim_I);
+                    free(sim_R);
+                    break;
                 }
-                free(sim_S);
-                free(sim_I);
-                free(sim_R);
+            
+               
+                // // Compute the new epsilon thresholds (75th percentiles) from the distances.
+                // epsilon_history[gen][0] = compute_percentile(distances_S, population_size, 0.75);
+                // epsilon_history[gen][1] = compute_percentile(distances_I, population_size, 0.75);
+                // epsilon_history[gen][2] = compute_percentile(distances_R, population_size, 0.75);
+
+                // // For saving, fill temporary epsilon arrays with the threshold of this generation.
+                // for (int i = 0; i < population_size; i++) {
+                //     epsilons_S[i] = epsilon_history[gen][0];
+                //     epsilons_I[i] = epsilon_history[gen][1];
+                //     epsilons_R[i] = epsilon_history[gen][2];
+                // }
+
+                // Save particles and epsilon thresholds to a CSV file.
+                char filename[256];
+                sprintf(filename, "/home/ubuntu/abc_sir/c_code/abc_smc_data/particles_gen_%d.csv", gen);
+                save_csv(filename, particles_beta, particles_gamma, epsilon_S, epsilon_I, epsilon_R, population_size);
+
+                free(distances_S);
+                free(distances_I);
+                free(distances_R);
+                }
             }
-        }
-        // Compute the new epsilon thresholds (75th percentiles) from the distances.
-        epsilon_history[gen][0] = compute_percentile(distances_S, population_size, 0.75);
-        epsilon_history[gen][1] = compute_percentile(distances_I, population_size, 0.75);
-        epsilon_history[gen][2] = compute_percentile(distances_R, population_size, 0.75);
 
-        // For saving, fill temporary epsilon arrays with the threshold of this generation.
-        for (int i = 0; i < population_size; i++) {
-            epsilons_S[i] = epsilon_history[gen][0];
-            epsilons_I[i] = epsilon_history[gen][1];
-            epsilons_R[i] = epsilon_history[gen][2];
-        }
-
-        // Save particles and epsilon thresholds to a CSV file.
-        char filename[256];
-        sprintf(filename, "/home/ubuntu/abc_sir/c_code/abc_smc_data/particles_gen_%d.csv", gen);
-        save_csv(filename, particles_beta, particles_gamma, epsilons_S, epsilons_I, epsilons_R, population_size);
-
-        free(distances_S);
-        free(distances_I);
-        free(distances_R);
     }
 
     // Free allocated arrays.
@@ -332,9 +352,10 @@ void run_abc_smc(const int *obs_S, const int *obs_I, const int *obs_R,
     free(epsilon_history);
     free(weight_beta);
     free(weight_gamma);
-    free(epsilons_S);
-    free(epsilons_I);
-    free(epsilons_R);
+    free(epsilon_S);
+    free(epsilon_I);
+    free(epsilon_R);
+    }
 }
 
 /* ---------------------------------------------------------------------
