@@ -19,3 +19,9 @@ c_code/abc_smc_data/particles_gen_7.csv
 c_code/abc_smc_data/particles_gen_8.csv
 c_code/abc_smc_data/particles_gen_9.csv
 c_code/abc_smc_data/particles_gen_10.csv
+py_code/abc_smc_data/accepted_params_gen_*.csv
+c_code/abc_smc_data/accepted_params_gen_*.csv
+c_code/abc_smc_data/10k_0.1_0.01/*
+c_code/abc_smc_data/10k_0.2_0.03/*
+py_code/abc_smc_data/10k_0.1_0.01/*
+py_code/abc_smc_data/10k_0.2_0.03/*
