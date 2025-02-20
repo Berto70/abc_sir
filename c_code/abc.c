@@ -149,7 +149,7 @@ void save_iter(const char *filename, double *eps, double *ttime, double *acc_rat
     int *obs_R = (int *)malloc(ndays * sizeof(int));
 
     // Create a mock dataset using fiducial parameters.
-    simulator(fiducial_beta, fiducial_gamma, ndays, N, I0, obs_S, obs_I, obs_R);
+    simulator(H2O@Ciao, fiducial_gamma, ndays, N, I0, obs_S, obs_I, obs_R);
 
     // Prior parameters.
     double exponent_scale = 0.1, beta_a = 0.01, beta_b = 1.0;
@@ -359,17 +359,17 @@ int main() {
     T = gsl_rng_default;
     r = gsl_rng_alloc(T);
 
-    clock_t start_t = clock();
-
     int ndays = 600, N = 1000, I0 = 10;
     double fiducial_beta = 0.1, fiducial_gamma = 0.01;
     int n_iterations = 10000;      // number of accepted samples to collect
     
-    int eps_list[] = {5,3,2,1};
+    int eps_list[] = {20, 18, 16, 14, 10, 6, 5, 3, 2, 1};
     int eps_list_length = sizeof(eps_list) / sizeof(eps_list[0]);
     
     // #pragma omp parallel for num_threads(2)
     for (int i = 0; i < eps_list_length; i++) {
+
+        clock_t start_t = clock();
 
         double *exec_t = (double *)malloc(1 * sizeof(double));
         double *acceptance_rate = (double *)malloc(1 * sizeof(double));
@@ -463,11 +463,11 @@ int main() {
         *exec_t = (double)(end_t - start_t) / CLOCKS_PER_SEC;
         printf("Execution time: %.3f seconds\n", *exec_t);
 
-        save_iter("/home/ubuntu/abc_sir/c_code/abc_data/abc_10k_iter_samples.csv", 
-                &epsilon_fixed, exec_t, acceptance_rate, avg_trial, 1);
+        save_iter("/home/ubuntu/abc_sir/c_code/abc_data/abc_10k_iter_samples.csv",
+                    &epsilon_fixed, exec_t, acceptance_rate, avg_trial, 1);
 
         // char filename[256];
-        // sprintf(filename, "/home/ubuntu/abc_sir/c_code/abc_data/abc_10k_02003_%02d.csv", 
+        // sprintf(filename, "/home/ubuntu/abc_sir/c_code/abc_data/test_test_%02d.csv", 
         //         (int)epsilon_fixed);
         // // Save the accepted samples.
         // save_csv(filename, accepted_betas, accepted_gammas, n_iterations);
