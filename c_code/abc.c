@@ -1,3 +1,12 @@
+/*
+ * SIR Model Simulation
+ * Author: Gabriele Bertinelli
+ * Date: 21-02-2025
+ *
+ * This program simulates the spread of an infectious disease using the SIR model,
+ * using the rejection ABC algorithm to infer the parameters of the model.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -93,7 +102,7 @@ void summary(double *data, int n, double *median, double *spread) {
     free(tmp);
 }
 
-// Add the following function before main():
+// Save beta and gamma parameters to a CSV file.
 void save_csv(const char *filename, double *betas, double *gammas, int n) {
     FILE *fp = fopen(filename, "w");
     if (!fp) {
@@ -107,6 +116,8 @@ void save_csv(const char *filename, double *betas, double *gammas, int n) {
     fclose(fp);
 }
 
+// Save epsilon, time, acceptance rate, and average number of trials to a CSV file
+// for each iteration.
 void save_iter(const char *filename, double *eps, double *ttime, double *acc_rate, double *avg_trial, int n) {
     // Open the file in append mode to preserve existing content.
     FILE *fp = fopen(filename, "a");
@@ -128,10 +139,159 @@ void save_iter(const char *filename, double *eps, double *ttime, double *acc_rat
     fclose(fp);
 }
 
-
-/*int main() {
+// Main function with multiple epsilon values.
+// This version loops over a list of epsilon values.
+// For each epsilon value it saves the results to a CSV file.
+// It saves all sampled parameters and adds flag: 0=rejected, 1=accepted
+int main() {
     // Initialize the GSL random number generator.
     const gsl_rng_type * T;
+    int ndays = 600, N = 1000, I0 = 10; // simulation parameters
+    double fiducial_beta = 0.1, fiducial_gamma = 0.01;
+    int n_iterations = 10000;      // number of accepted samples to collect
+    
+    int eps_list[] = {1}; // update the list as needed
+    int eps_list_length = sizeof(eps_list) / sizeof(eps_list[0]);
+    
+    // Loop over epsilon values.
+    for (int i = 0; i < eps_list_length; i++) {
+
+        clock_t start_t = clock();
+
+        double *exec_t = (double *)malloc(1 * sizeof(double));
+        double *acceptance_rate = (double *)malloc(1 * sizeof(double));
+        double *avg_trial = (double *)malloc(1 * sizeof(double));
+
+        // Allocate observed data arrays.
+        int *obs_S = (int *)malloc(ndays * sizeof(int));
+        int *obs_I = (int *)malloc(ndays * sizeof(int));
+        int *obs_R = (int *)malloc(ndays * sizeof(int));
+
+        if (obs_S == NULL || obs_I == NULL || obs_R == NULL) {
+            fprintf(stderr, "Error: Memory allocation failed for observed data arrays.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // Create a mock dataset using fiducial parameters.
+        simulator(fiducial_beta, fiducial_gamma, ndays, N, I0, obs_S, obs_I, obs_R);
+
+        // Prior parameters.
+        double exponent_scale = 0.1, beta_a = 0.01, beta_b = 1.0;
+        // Allocate arrays for accepted samples.
+        double *accepted_betas = (double *)malloc(n_iterations * sizeof(double));
+        double *accepted_gammas = (double *)malloc(n_iterations * sizeof(double));
+
+        if (accepted_betas == NULL || accepted_gammas == NULL) {
+            fprintf(stderr, "Error: Memory allocation failed for accepted samples.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        double epsilon_fixed = eps_list[i];  // acceptance threshold
+
+        // Open a CSV file to save all beta and gamma proposals (flag: 0=rejected, 1=accepted).
+        char sample_filename[256];
+        sprintf(sample_filename, "/home/ubuntu/abc_sir/c_code/abc_data/abc_10k_%02d_samples.csv", (int)epsilon_fixed);
+        FILE *fp_samples = fopen(sample_filename, "w");
+        if (!fp_samples) {
+            fprintf(stderr, "Error: could not open file %s for writing samples.\n", sample_filename);
+            exit(EXIT_FAILURE);
+        }
+        fprintf(fp_samples, "beta,gamma,flag\n");
+        
+        // Initialize counters.
+        int total_proposals = 0;
+        int total_trials = 0;
+
+        // Loop until it obtains n_iterations samples.
+        for (int iter = 0; iter < n_iterations; iter++) {
+            int trials = 0;
+            while (1) { // Loop until it accepts a sample.
+                trials++;
+                total_proposals++; 
+                // Sample from priors.
+                double beta = sample_exponential(exponent_scale);
+                double gamma = sample_beta(beta_a, beta_b);
+
+                // Allocate arrays for simulation output.
+                int *sim_S = malloc(ndays * sizeof(int));
+                int *sim_I = malloc(ndays * sizeof(int));
+                int *sim_R = malloc(ndays * sizeof(int));
+
+                // Simulate with sampled parameters.
+                simulator(beta, gamma, ndays, N, I0, sim_S, sim_I, sim_R);
+
+                double d_S, d_I, d_R;
+                distance(N, ndays, obs_S, obs_I, obs_R, sim_S, sim_I, sim_R, 
+                        &d_S, &d_I, &d_R);
+
+                // Free simulation arrays.
+                free(sim_S);
+                free(sim_I);
+                free(sim_R);
+
+                // Check acceptance.
+                if (d_S <= epsilon_fixed && d_I <= epsilon_fixed && d_R <= epsilon_fixed) {
+                    // Save accepted sample with flag 1.
+                    accepted_betas[iter] = beta;
+                    accepted_gammas[iter] = gamma;
+                    total_trials += trials;
+                    fprintf(fp_samples, "%.6f,%.6f,1\n", beta, gamma);
+                    break; 
+                } else {
+                    // Save discarded proposal with flag 0.
+                    fprintf(fp_samples, "%.6f,%.6f,0\n", beta, gamma);
+                }
+            }
+        }
+        // Close the CSV file for samples.
+        fclose(fp_samples);
+
+        // Compute acceptance rate and average number of trials.
+        *acceptance_rate = (double)n_iterations / total_proposals;
+        *avg_trial = (double)total_trials / n_iterations;
+        printf("Acceptance rate: %.3f, Average number of trials: %.3f\n",
+            *acceptance_rate, *avg_trial);
+
+        // Compute medians on accepted parameters.
+        double median_beta, median_gamma, spread_dummy;
+        summary(accepted_betas, n_iterations, &median_beta, &spread_dummy);
+        summary(accepted_gammas, n_iterations, &median_gamma, &spread_dummy);
+        printf("Median beta: %.3f\n", median_beta);
+        printf("Median gamma: %.3f\n", median_gamma);
+
+        clock_t end_t = clock();
+        *exec_t = (double)(end_t - start_t) / CLOCKS_PER_SEC;
+        printf("Execution time: %.3f seconds\n", *exec_t);
+
+        save_iter("/home/ubuntu/abc_sir/c_code/abc_data/abc_10k_iter_samples.csv",
+                    &epsilon_fixed, exec_t, acceptance_rate, avg_trial, 1);
+
+        // char filename[256];
+        // sprintf(filename, "/home/ubuntu/abc_sir/c_code/abc_data/test_test_%02d.csv", 
+        //         (int)epsilon_fixed);
+        // // Save the accepted samples.
+        // save_csv(filename, accepted_betas, accepted_gammas, n_iterations);
+
+        free(obs_S);
+        free(obs_I);
+        free(obs_R);
+        free(accepted_betas);
+        free(accepted_gammas);
+        free(exec_t);
+        free(acceptance_rate);
+        free(avg_trial);
+    }
+
+    // Free the GSL random number generator.
+    gsl_rng_free(r);
+
+    return 0;
+}
+
+// Initial main function. Now deprecated.
+/*int main() {
+    // Initialize the GSL random number generator.
+    simulator(fiducial_beta, fiducial_gamma, ndays, N, I0, obs_S, obs_I, obs_R);
     gsl_rng_env_setup();
     T = gsl_rng_default;
     r = gsl_rng_alloc(T);
@@ -148,9 +308,24 @@ void save_iter(const char *filename, double *eps, double *ttime, double *acc_rat
     int *obs_I = (int *)malloc(ndays * sizeof(int));
     int *obs_R = (int *)malloc(ndays * sizeof(int));
 
-    // Create a mock dataset using fiducial parameters.
-    simulator(H2O@Ciao, fiducial_gamma, ndays, N, I0, obs_S, obs_I, obs_R);
+    if (obs_S == NULL || obs_I == NULL || obs_R == NULL) {
+        fprintf(stderr, "Error: Memory allocation failed for observed data arrays.\n");
+        exit(EXIT_FAILURE);
+    }
+    }
 
+    // Allocate observed data arrays.
+    int *obs_S = (int *)malloc(ndays * sizeof(int));
+    int *obs_I = (int *)malloc(ndays * sizeof(int));
+    int *obs_R = (int *)malloc(ndays * sizeof(int));
+
+    // Create a mock dataset using fiducial parameters.
+    double *accepted_betas = (double *)malloc(n_iterations * sizeof(double));
+    double *accepted_gammas = (double *)malloc(n_iterations * sizeof(double));
+    if (accepted_betas == NULL || accepted_gammas == NULL) {
+        fprintf(stderr, "Error: Memory allocation failed for accepted_betas or accepted_gammas.\n");
+        exit(EXIT_FAILURE);
+    }
     // Prior parameters.
     double exponent_scale = 0.1, beta_a = 0.01, beta_b = 1.0;
     // Allocate arrays for accepted samples.
@@ -170,7 +345,12 @@ void save_iter(const char *filename, double *eps, double *ttime, double *acc_rat
             double gamma = sample_beta(beta_a, beta_b);
 
             // Allocate arrays for simulation output.
-            int *sim_S = (int *)malloc(ndays * sizeof(int));
+            if (sim_S == NULL || sim_I == NULL || sim_R == NULL) {
+                fprintf(stderr, "Error: Memory allocation failed for simulation arrays.\n");
+                exit(EXIT_FAILURE);
+            }
+
+            simulator(beta, gamma, ndays, N, I0, sim_S, sim_I, sim_R);
             int *sim_I = (int *)malloc(ndays * sizeof(int));
             int *sim_R = (int *)malloc(ndays * sizeof(int));
 
@@ -227,6 +407,10 @@ void save_iter(const char *filename, double *eps, double *ttime, double *acc_rat
     return 0;
 }*/
 
+// Main function with multiple epsilon values.
+// This version loops over a list of epsilon values.
+// For each epsilon value it saves the results to a CSV file.
+// It DOES SAVE only the accepted parameters.
 /*int main() {
     // Initialize the GSL random number generator.
     const gsl_rng_type * T;
@@ -240,10 +424,9 @@ void save_iter(const char *filename, double *eps, double *ttime, double *acc_rat
     double fiducial_beta = 0.2, fiducial_gamma = 0.03;
     int n_iterations = 10000;      // number of accepted samples to collect
     
-    int eps_list[] = {20, 18, 16, 14, 10, 6, 5, 3, 2, 1};;
+    int eps_list[] = {20, 18, 16, 14, 10, 6, 5, 3, 2, 1};
     int eps_list_length = sizeof(eps_list) / sizeof(eps_list[0]);
     
-    // #pragma omp parallel for num_threads(2)
     for (int i = 0; i < eps_list_length; i++) {
 
         double *exec_t = (double *)malloc(1 * sizeof(double));
@@ -351,139 +534,3 @@ void save_iter(const char *filename, double *eps, double *ttime, double *acc_rat
 
     return 0;
 }*/
-
-int main() {
-    // Initialize the GSL random number generator.
-    const gsl_rng_type * T;
-    gsl_rng_env_setup();
-    T = gsl_rng_default;
-    r = gsl_rng_alloc(T);
-
-    int ndays = 600, N = 1000, I0 = 10;
-    double fiducial_beta = 0.1, fiducial_gamma = 0.01;
-    int n_iterations = 10000;      // number of accepted samples to collect
-    
-    int eps_list[] = {1};
-    int eps_list_length = sizeof(eps_list) / sizeof(eps_list[0]);
-    
-    // #pragma omp parallel for num_threads(2)
-    for (int i = 0; i < eps_list_length; i++) {
-
-        clock_t start_t = clock();
-
-        double *exec_t = (double *)malloc(1 * sizeof(double));
-        double *acceptance_rate = (double *)malloc(1 * sizeof(double));
-        double *avg_trial = (double *)malloc(1 * sizeof(double));
-
-        // Allocate observed data arrays.
-        int *obs_S = (int *)malloc(ndays * sizeof(int));
-        int *obs_I = (int *)malloc(ndays * sizeof(int));
-        int *obs_R = (int *)malloc(ndays * sizeof(int));
-
-        // Create a mock dataset using fiducial parameters.
-        simulator(fiducial_beta, fiducial_gamma, ndays, N, I0, obs_S, obs_I, obs_R);
-
-        // Prior parameters.
-        double exponent_scale = 0.1, beta_a = 0.01, beta_b = 1.0;
-        // Allocate arrays for accepted samples.
-        double *accepted_betas = (double *)malloc(n_iterations * sizeof(double));
-        double *accepted_gammas = (double *)malloc(n_iterations * sizeof(double));
-
-        double epsilon_fixed = eps_list[i];  // acceptance threshold
-
-        // Open a CSV file to save all beta and gamma proposals (flag: 0=rejected, 1=accepted).
-        char sample_filename[256];
-        sprintf(sample_filename, "/home/ubuntu/abc_sir/c_code/abc_data/abc_10k_%02d_samples.csv", (int)epsilon_fixed);
-        FILE *fp_samples = fopen(sample_filename, "w");
-        if (!fp_samples) {
-            fprintf(stderr, "Error: could not open file %s for writing samples.\n", sample_filename);
-            exit(EXIT_FAILURE);
-        }
-        fprintf(fp_samples, "beta,gamma,flag\n");
-
-        int total_proposals = 0;
-        int total_trials = 0;
-
-        // For each accepted sample.
-        for (int iter = 0; iter < n_iterations; iter++) {
-            int trials = 0;
-            while (1) {
-                trials++;
-                total_proposals++; 
-                // Sample from prior using GSL functions.
-                double beta = sample_exponential(exponent_scale);
-                double gamma = sample_beta(beta_a, beta_b);
-
-                // Allocate arrays for simulation output.
-                int *sim_S = malloc(ndays * sizeof(int));
-                int *sim_I = malloc(ndays * sizeof(int));
-                int *sim_R = malloc(ndays * sizeof(int));
-
-                simulator(beta, gamma, ndays, N, I0, sim_S, sim_I, sim_R);
-
-                double d_S, d_I, d_R;
-                distance(N, ndays, obs_S, obs_I, obs_R, sim_S, sim_I, sim_R, 
-                        &d_S, &d_I, &d_R);
-
-                // Free simulation arrays.
-                free(sim_S);
-                free(sim_I);
-                free(sim_R);
-
-                // Check acceptance.
-                if (d_S <= epsilon_fixed && d_I <= epsilon_fixed && d_R <= epsilon_fixed) {
-                    // Save accepted sample with flag 1.
-                    accepted_betas[iter] = beta;
-                    accepted_gammas[iter] = gamma;
-                    total_trials += trials;
-                    fprintf(fp_samples, "%.6f,%.6f,1\n", beta, gamma);
-                    break; 
-                } else {
-                    // Save discarded proposal with flag 0.
-                    fprintf(fp_samples, "%.6f,%.6f,0\n", beta, gamma);
-                }
-            }
-        }
-        // Close the CSV file for samples.
-        fclose(fp_samples);
-
-        *acceptance_rate = (double)n_iterations / total_proposals;
-        *avg_trial = (double)total_trials / n_iterations;
-        printf("Acceptance rate: %.3f, Average number of trials: %.3f\n",
-            *acceptance_rate, *avg_trial);
-
-        // Compute medians on accepted parameters.
-        double median_beta, median_gamma, spread_dummy;
-        summary(accepted_betas, n_iterations, &median_beta, &spread_dummy);
-        summary(accepted_gammas, n_iterations, &median_gamma, &spread_dummy);
-        printf("Median beta: %.3f\n", median_beta);
-        printf("Median gamma: %.3f\n", median_gamma);
-
-        clock_t end_t = clock();
-        *exec_t = (double)(end_t - start_t) / CLOCKS_PER_SEC;
-        printf("Execution time: %.3f seconds\n", *exec_t);
-
-        save_iter("/home/ubuntu/abc_sir/c_code/abc_data/abc_10k_iter_samples.csv",
-                    &epsilon_fixed, exec_t, acceptance_rate, avg_trial, 1);
-
-        // char filename[256];
-        // sprintf(filename, "/home/ubuntu/abc_sir/c_code/abc_data/test_test_%02d.csv", 
-        //         (int)epsilon_fixed);
-        // // Save the accepted samples.
-        // save_csv(filename, accepted_betas, accepted_gammas, n_iterations);
-
-        free(obs_S);
-        free(obs_I);
-        free(obs_R);
-        free(accepted_betas);
-        free(accepted_gammas);
-        free(exec_t);
-        free(acceptance_rate);
-        free(avg_trial);
-    }
-
-    // Free the GSL random number generator.
-    gsl_rng_free(r);
-
-    return 0;
-}
