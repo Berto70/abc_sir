@@ -2,283 +2,277 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <string.h>
 #include <gsl/gsl_rng.h>
 #include <gsl/gsl_randist.h>
-#include <gsl/gsl_statistics_double.h>
-#include <gsl/gsl_sort.h>
+#include <gsl/gsl_statistics.h>
 
-#define DEFAULT_I0 10
+#define PATH "/home/ubuntu/abc_sir/c_code/abc_smc_data/10k_0.2_0.03/"
 
-// Helper: Compute percentile from an array (copy it and use gsl_sort)
-double compute_percentile(const double *data, int n, double perc) {
-    double *copy = malloc(n * sizeof(double));
-    for (int i = 0; i < n; i++)
-        copy[i] = data[i];
-    gsl_sort(copy, 1, n);
-    double pos = (n - 1) * perc / 100.0;
-    int idx = (int)floor(pos);
-    double frac = pos - idx;
-    double perc_val = copy[idx] + frac * ((idx+1 < n ? copy[idx+1] : copy[idx]) - copy[idx]);
-    free(copy);
-    return perc_val;
+// Data structure to store SIR simulation results.
+typedef struct {
+    int *S;
+    int *I;
+    int *R;
+    int ndays;
+} SimulationData;
+
+// Data structure to store model parameters.
+typedef struct {
+    double beta;
+    double gamma;
+} Parameters;
+
+// Data structure to store Euclidean distances.
+typedef struct {
+    double dS;
+    double dI;
+    double dR;
+} Distances;
+
+// Helper function to free SimulationData
+void free_simulation(SimulationData *sim) {
+    if(sim) {
+        free(sim->S);
+        free(sim->I);
+        free(sim->R);
+        free(sim);
+    }
 }
 
-// Simulator: computes S, I, R arrays over ndays given beta and gamma.
-void simulator(gsl_rng *rng, double beta, double gamma, int ndays, int N, 
-                int I0, double *S, double *I, double *R) {
-    // ...allocate temporary arrays for frac_infected, dI, dR...
-    double *frac_infected = calloc(ndays, sizeof(double));
-    double *dI = calloc(ndays, sizeof(double));
-    double *dR = calloc(ndays, sizeof(double));
+// SIR simulator: simulates for ndays days.
+SimulationData* simulator(double beta, double gamma, int ndays, int N, int I0, gsl_rng *rng) {
+    SimulationData *sim = malloc(sizeof(SimulationData));
+    sim->ndays = ndays;
+    sim->S = calloc(ndays, sizeof(int));
+    sim->I = calloc(ndays, sizeof(int));
+    sim->R = calloc(ndays, sizeof(int));
     
-    S[0] = N - I0;
-    I[0] = I0;
-    R[0] = 0;
+    double *frac_infected = calloc(ndays, sizeof(double));  // temporary array for fraction infected
+    int t;
+    
+    sim->S[0] = N - I0;
+    sim->I[0] = I0;
+    sim->R[0] = 0;
     frac_infected[0] = (double)I0 / N;
     
-    for (int t = 1; t < ndays; t++) {
-        unsigned int nS = (unsigned int)S[t-1];
-        double pI = 1 - exp(-beta * frac_infected[t-1]);
-        // Binomial draw for new infections
-        dI[t] = gsl_ran_binomial(rng, pI, nS);
+    for(t = 1; t < ndays; t++){
+        unsigned int s_prev = sim->S[t-1];
+        unsigned int i_prev = sim->I[t-1];
         
-        unsigned int nI = (unsigned int)I[t-1];
-        dR[t] = gsl_ran_binomial(rng, gamma, nI);
+        double p_inf = 1 - exp(-beta * frac_infected[t-1]);
+        // Get new infections and recoveries using binomial draws
+        unsigned int new_inf = gsl_ran_binomial(rng, p_inf, s_prev);
+        unsigned int new_rec = gsl_ran_binomial(rng, gamma, i_prev);
         
-        S[t] = S[t-1] - dI[t];
-        I[t] = I[t-1] + dI[t] - dR[t];
-        R[t] = R[t-1] + dR[t];
+        sim->S[t] = sim->S[t-1] - new_inf;
+        sim->I[t] = sim->I[t-1] + new_inf - new_rec;
+        sim->R[t] = sim->R[t-1] + new_rec;
         
-        frac_infected[t] = I[t] / (double)N;
+        frac_infected[t] = (double)sim->I[t] / N;
         
-        if ((int)(S[t] + I[t] + R[t]) != N) {
-            fprintf(stderr, "Error at day %d: S+I+R != N\n", t);
+        if(sim->S[t] + sim->I[t] + sim->R[t] != N){
+            fprintf(stderr, "Error: S+I+R != N at day %d\n", t);
+            free_simulation(sim);
+            free(frac_infected);
             exit(EXIT_FAILURE);
         }
     }
     free(frac_infected);
-    free(dI);
-    free(dR);
+    return sim;
 }
 
-// Summary: compute mean and spread (90th - 10th percentile) using GSL functions.
-void summary(const double *data, size_t n, double out[2]) {
-    out[0] = gsl_stats_mean(data, 1, n); // mean as "median"
-    double p90 = compute_percentile(data, n, 90.0);
-    double p10 = compute_percentile(data, n, 10.0);
-    out[1] = p90 - p10;
+// Prior sampler: β ~ Exponential(scale), γ ~ Beta(a, b)
+Parameters prior(double exponent_scale, double beta_a, double beta_b, gsl_rng *rng) {
+    Parameters par;
+    par.beta = gsl_ran_exponential(rng, exponent_scale);
+    par.gamma = gsl_ran_beta(rng, beta_a, beta_b);
+    return par;
 }
 
-// Compute Euclidean norm difference between two int arrays.
-double compute_norm(int *a, int *b, int n) {
-    double sum = 0;
-    for (int i = 0; i < n; i++) {
-        double diff = a[i] - b[i];
-        sum += diff * diff;
+// Compute Euclidean norm difference normalized by N.
+Distances distance(int N, SimulationData *observed, SimulationData *simulated) {
+    Distances dist = {0.0, 0.0, 0.0};
+    int t;
+    double sum_S = 0, sum_I = 0, sum_R = 0;
+    for(t = 0; t < observed->ndays; t++){
+        sum_S += pow(simulated->S[t] - observed->S[t], 2);
+        sum_I += pow(simulated->I[t] - observed->I[t], 2);
+        sum_R += pow(simulated->R[t] - observed->R[t], 2);
     }
-    return sqrt(sum);
+    dist.dS = sqrt(sum_S) / N;
+    dist.dI = sqrt(sum_I) / N;
+    dist.dR = sqrt(sum_R) / N;
+    return dist;
 }
 
-// Distance: computes L2 norm differences for S, I, R arrays.
-double distance(int N, int ndays, const double *obs_S, const double *obs_I, 
-                const double *obs_R, const double *sim_S, const double *sim_I, 
-                const double *sim_R) {
-    double sumS = 0.0, sumI = 0.0, sumR = 0.0;
-    
-    sumS = compute_norm(sim_S, obs_S, ndays);
-    sumI = compute_norm(sim_I, obs_I, ndays);
-    sumR = compute_norm(sim_R, obs_R, ndays);
-
-    double d_S = sqrt(sumS) / N;
-    double d_I = sqrt(sumI) / N;
-    double d_R = sqrt(sumR) / N;
-    return d_S + d_I + d_R;
-}
-
-// Sample parameters from prior: beta ~ Exponential(scale), gamma ~ Beta(a, b)
-void sample_prior(gsl_rng *rng, double exponent_scale, double beta_a, 
-                 double beta_b, double *beta, double *gamma) {
-    *beta = gsl_ran_exponential(rng, exponent_scale);
-    *gamma = gsl_ran_beta(rng, beta_a, beta_b);
-}
-
-// Add the following function before main():
-void save_csv(const char *filename, double *betas, double *gammas, 
-             double *epsilons, int n) {
-    FILE *fp = fopen(filename, "w");
-    if (!fp) {
-        fprintf(stderr, "Error: could not open file %s for writing.\n", filename);
-        return;
+// Perturb a sample given a list of accepted parameters.
+Parameters perturb_sample(Parameters *accepted_samples, int count, double std_beta, double std_gamma, gsl_rng *rng) {
+    Parameters new_par;
+    int idx;
+    do {
+        // Randomly select a sample from the list of accepted samples.
+        idx = gsl_rng_uniform_int(rng, count);
+        double beta = accepted_samples[idx].beta;
+        double gamma = accepted_samples[idx].gamma;
+        new_par.beta = beta + gsl_ran_gaussian(rng, std_beta); // Gaussian random walk
+        new_par.gamma = gamma + gsl_ran_gaussian(rng, std_gamma);
     }
-    fprintf(fp, "beta,gamma,epsilon\n");
-    for (int i = 0; i < n; i++) {
-        fprintf(fp, "%.6f,%.6f,%.6f\n", betas[i], gammas[i], epsilons[i]);
-    }
-    fclose(fp);
+    // Ensure beta > 0 and 0 <= gamma <= 1 
+    while(new_par.beta <= 0 || new_par.gamma < 0 || new_par.gamma > 1);
+    return new_par;
 }
 
-// Run ABC-SMC algorithm using plain functions.
-void run_abc_smc(gsl_rng *rng, const double *obs_S, const double *obs_I, 
-                const double *obs_R, int ndays, int N, int n_generations, 
-                int population_size, double exponent_scale, double beta_a, 
-                double beta_b, double **final_betas, double **final_gammas, 
-                double **epsilon_history_out) {
-    // Allocate arrays to store particles (each particle: beta and gamma) and distances.
-    double *particles_beta = malloc(population_size * sizeof(double));
-    double *particles_gamma = malloc(population_size * sizeof(double));
-    double *distances = malloc(population_size * sizeof(double));
+// Helper function for double comparison in qsort.
+int compare_doubles(const void *a, const void *b) {
+    double diff = *(double*)a - *(double*)b;
+    return (diff > 0) - (diff < 0);
+}
+
+// Compute the percentile value from an array of doubles.
+double compute_percentile(double *data, int size, double percentile) {
+    double *copy = malloc(size * sizeof(double));
+    memcpy(copy, data, size*sizeof(double));
+    qsort(copy, size, sizeof(double), compare_doubles);
+    int idx = (int) floor(percentile/100.0 * (size - 1));
+    double value = copy[idx];
+    free(copy);
+    return value;
+}
+
+// Main ABC SMC routine.
+void run_abc(int n_particles, int n_generations, int ndays, int N, int I0, SimulationData *observed, gsl_rng *rng) {
+    int gen, i;
+    double tol[3] = {INFINITY, INFINITY, INFINITY}; // Initial tolerances for S, I, R
+    Parameters *prev_accepted = NULL;  // previous generation accepted samples
     
-    double *epsilon_history = malloc((n_generations) * sizeof(double));
-    
-    // Generation 0: sample from prior.
-    printf("Running Generation 0 ...\n");
-    clock_t start_t = clock();
-    for (int i = 0; i < population_size; i++) {
-        double beta, gamma;
-        sample_prior(rng, exponent_scale, beta_a, beta_b, &beta, &gamma);
-        // Allocate simulator arrays.
-        double *S = malloc(ndays * sizeof(double));
-        double *I = malloc(ndays * sizeof(double));
-        double *R = malloc(ndays * sizeof(double));
-        simulator(rng, beta, gamma, ndays, N, DEFAULT_I0, S, I, R);
-        distances[i] = distance(N, ndays, obs_S, obs_I, obs_R, S, I, R);
-        particles_beta[i] = beta;
-        particles_gamma[i] = gamma;
-        free(S); free(I); free(R);
+    FILE *fp_stats = NULL; // File pointer for writing generation stats
+    char filename_stats[256];
+    snprintf(filename_stats, sizeof(filename_stats), "%sgeneration_stats.csv", PATH);
+    fp_stats = fopen(filename_stats, "w");
+    if(!fp_stats){
+        fprintf(stderr, "Error opening %s for writing.\n", filename_stats);
+        exit(EXIT_FAILURE);
     }
-    double epsilon = compute_percentile(distances, population_size, 75.0);
-    epsilon_history[0] = epsilon;
-    printf("Generation 0: epsilon = %.5f\n", epsilon);
+    fprintf(fp_stats, "generation,exec_time,tol_S,tol_I,tol_R\n");
     
-    // For subsequent generations.
-    for (int gen = 1; gen < n_generations; gen++) {
-        double *new_particles_beta = malloc(population_size * sizeof(double));
-        double *new_particles_gamma = malloc(population_size * sizeof(double));
-        double *new_distances = malloc(population_size * sizeof(double));
+    // Loop over generations
+    for(gen = 0; gen < n_generations; gen++){
+        clock_t start_time = clock();
+        Parameters *accepted_params = malloc(n_particles * sizeof(Parameters));
+        double *ds_arr = malloc(n_particles * sizeof(double));
+        double *di_arr = malloc(n_particles * sizeof(double));
+        double *dr_arr = malloc(n_particles * sizeof(double));
         int count = 0;
-        printf("Running Generation %d ...\n", gen);
-        while (count < population_size) {
-            int idx = gsl_rng_uniform_int(rng, population_size);
-            double beta_old = particles_beta[idx];
-            double gamma_old = particles_gamma[idx];
-            // Perturbation with Gaussian kernel, std=0.01.
-            double new_beta = beta_old + gsl_ran_gaussian(rng, 0.01);
-            double new_gamma = gamma_old + gsl_ran_gaussian(rng, 0.01);
-            if (new_beta <= 0 || new_gamma <= 0 || new_gamma > 1)
-                continue;
-            double *S = malloc(ndays * sizeof(double));
-            double *I = malloc(ndays * sizeof(double));
-            double *R = malloc(ndays * sizeof(double));
-            simulator(rng, new_beta, new_gamma, ndays, N, DEFAULT_I0, S, I, R);
-            double d = distance(N, ndays, obs_S, obs_I, obs_R, S, I, R);
-            free(S); free(I); free(R);
-            if (d <= epsilon) {
-                new_particles_beta[count] = new_beta;
-                new_particles_gamma[count] = new_gamma;
-                new_distances[count] = d;
-                count++;
-            }
-            }
-        // Update epsilon as the 75th percentile of new distances.
-        epsilon = compute_percentile(new_distances, population_size, 75.0);
-        epsilon_history[gen] = epsilon;
-        printf("Generation %d: epsilon = %.5f\n", gen, epsilon);
-
-        {
-            char filename[256];
-            sprintf(filename, "/home/ubuntu/iti/project/C/smc_data/abc_smc_gen_%d.csv", gen);
-            FILE *fp = fopen(filename, "w");
-            if (fp) {
-                fprintf(fp, "beta,gamma,epsilon\n");
-                for (int i = 0; i < population_size; i++) {
-                    fprintf(fp, "%.6f,%.6f,%.6f\n", new_particles_beta[i], 
-                            new_particles_gamma[i], new_distances[i]);
+        
+        // Sample util n_particles accepted samples are obtained.
+        while(count < n_particles) {
+            Parameters par;
+            // Sample from prior for first generation, else perturb from previous accepted samples.
+            if(gen == 0) {
+                par = prior(0.2, 0.03, 1.0, rng);
+            } else {
+                /*// Estimate perturbation std from previous accepted samples.
+                double sum_beta = 0, sum_gamma = 0;
+                for(i = 0; i < n_particles; i++) {
+                    sum_beta += prev_accepted[i].beta;
+                    sum_gamma += prev_accepted[i].gamma;
                 }
-                fclose(fp);
+                double mean_beta = sum_beta / n_particles;
+                double mean_gamma = sum_gamma / n_particles;
+                double var_beta = 0, var_gamma = 0;
+                for(i = 0; i < n_particles; i++) {
+                    var_beta += pow(prev_accepted[i].beta - mean_beta, 2);
+                    var_gamma += pow(prev_accepted[i].gamma - mean_gamma, 2);
+                }
+                double std_beta = (var_beta>0 ? sqrt(var_beta/n_particles) : 0.1);
+                double std_gamma = (var_gamma>0 ? sqrt(var_gamma/n_particles) : 0.1);*/
+                double *beta_array = malloc(n_particles * sizeof(double));
+                double *gamma_array = malloc(n_particles * sizeof(double));
+                for(i = 0; i < n_particles; i++){
+                    beta_array[i] = prev_accepted[i].beta;
+                    gamma_array[i] = prev_accepted[i].gamma;
+                }
+                double std_beta = gsl_stats_sd(beta_array, 1, n_particles);
+                double std_gamma = gsl_stats_sd(gamma_array, 1, n_particles);
+                // Perturb sample
+                par = perturb_sample(prev_accepted, n_particles, std_beta, std_gamma, rng);
+                free(beta_array);
+                free(gamma_array);
+            }
+            SimulationData *sim = simulator(par.beta, par.gamma, ndays, N, I0, rng);
+            Distances d = distance(N, observed, sim);
+            free_simulation(sim);
+            if(d.dS <= tol[0] && d.dI <= tol[1] && d.dR <= tol[2]) {
+                accepted_params[count] = par;
+                ds_arr[count] = d.dS;
+                di_arr[count] = d.dI;
+                dr_arr[count] = d.dR;
+                count++;
             }
         }
         
-        // Replace old particles.
-        free(particles_beta);
-        free(particles_gamma);
-        free(distances);
-        particles_beta = new_particles_beta;
-        particles_gamma = new_particles_gamma;
-        distances = new_distances;
+        // Save accepted parameters for this generation to CSV.
+        char filename[256];
+        snprintf(filename, sizeof(filename), "%saccepted_params_gen_%d.csv", PATH, gen);
+        FILE *fp = fopen(filename, "w");
+        if(!fp){
+            fprintf(stderr, "Error opening %s for writing.\n", filename);
+            exit(EXIT_FAILURE);
+        }
+        fprintf(fp, "beta,gamma\n");
+        for(i = 0; i < n_particles; i++){
+            fprintf(fp, "%lf,%lf\n", accepted_params[i].beta, accepted_params[i].gamma);
+        }
+        fclose(fp);
+        
+        // Update tolerances using 75th percentile.
+        tol[0] = compute_percentile(ds_arr, n_particles, 75.0);
+        tol[1] = compute_percentile(di_arr, n_particles, 75.0);
+        tol[2] = compute_percentile(dr_arr, n_particles, 75.0);
+        printf("Generation %d completed. New tolerance values - dS: %lf, dI: %lf, dR: %lf\n", gen, tol[0], tol[1], tol[2]);
+        
+        double exec_time = ((double) (clock() - start_time)) / CLOCKS_PER_SEC;
+        printf("Generation %d execution time: %.2lf seconds\n", gen, exec_time);
+        fprintf(fp_stats, "%d,%.2lf,%lf,%lf,%lf\n", gen, exec_time, tol[0], tol[1], tol[2]);
+        
+        // Free previous accepted samples if exist.
+        if(prev_accepted != NULL)
+            free(prev_accepted);
+        prev_accepted = accepted_params;
+        free(ds_arr);
+        free(di_arr);
+        free(dr_arr);
     }
-    clock_t end_t = clock();
-    double time_taken = ((double)(end_t - start_t)) / CLOCKS_PER_SEC;
-    printf("Time taken: %.2f seconds\n", time_taken);
-    
-    *final_betas = particles_beta;   // Caller is responsible for freeing these arrays.
-    *final_gammas = particles_gamma;
-    *epsilon_history_out = epsilon_history;
-    
-    free(distances);
+    fclose(fp_stats);
+    if(prev_accepted)
+        free(prev_accepted);
 }
 
-// ---- Main function ----
-int main(void) {
-    // Initialize GSL RNG.
-    const gsl_rng_type *T;
-    gsl_rng *rng;
-    gsl_rng_env_setup();
-    T = gsl_rng_default;
-    rng = gsl_rng_alloc(T);
+// Main function.
+int main() {
+    // Initialize RNG
+    gsl_rng *rng = gsl_rng_alloc(gsl_rng_default);
+    gsl_rng_set(rng, 9725); // set seed for reproducibility
     
-    int ndays = 600;
-    int N = 1000;
-    // int sim_I0 = 10;
+    // Simulation settings
+    int ndays = 600;    // number of days to simulate
+    int N = 1000;       // total population
+    int I0 = 10;        // initial infected
     
-    // Create a mock dataset using fiducial parameters.
-    double fiducial_beta = 0.1;
-    double fiducial_gamma = 0.01;
-    double *obs_S = malloc(ndays * sizeof(double));
-    double *obs_I = malloc(ndays * sizeof(double));
-    double *obs_R = malloc(ndays * sizeof(double));
-    simulator(rng, fiducial_beta, fiducial_gamma, ndays, N, 
-             DEFAULT_I0, obs_S, obs_I, obs_R);
+    // True parameters for observed data
+    double true_beta = 0.1;
+    double true_gamma = 0.01;
+    SimulationData *observed = simulator(true_beta, true_gamma, ndays, N, I0, rng);
     
-    // Parameters for ABC-SMC.
-    int n_generations = 11;
-    int population_size = 10000;
-    double exponent_scale = 0.1;
-    double beta_a = 1e-2;
-    double beta_b = 1;
+    // ABC SMC settings
+    int n_particles = 10000;  // number of particles per generation
+    int n_generations = 16;    // number of generations
     
-    double *final_betas = NULL;
-    double *final_gammas = NULL;
-    double *epsilon_history = NULL;
+    printf("Starting ABC SMC...\n");
+    run_abc(n_particles, n_generations, ndays, N, I0, observed, rng);
     
-    run_abc_smc(rng, obs_S, obs_I, obs_R, ndays, N, n_generations, 
-                population_size, exponent_scale, beta_a, beta_b,
-                &final_betas, &final_gammas, &epsilon_history);
-    
-    // For simplicity, print the first 5 final beta/gamma samples and epsilon history.
-    printf("Final accepted beta samples (first 5):\n");
-    for (int i = 0; i < (population_size < 5 ? population_size : 5); i++) {
-        printf("%.5f ", final_betas[i]);
-    }
-    printf("\nFinal accepted gamma samples (first 5):\n");
-    for (int i = 0; i < (population_size < 5 ? population_size : 5); i++) {
-        printf("%.5f ", final_gammas[i]);
-    }
-    printf("\nEpsilon history:\n");
-    for (int i = 0; i < n_generations; i++) {
-        printf("%.5f ", epsilon_history[i]);
-    }
-    printf("\n");
-
-    // Save the final beta/gamma samples and epsilon history to a CSV file.
-    save_csv("/home/ubuntu/iti/project/C/abc_smc_final.csv", final_betas, 
-            final_gammas, epsilon_history, population_size);
-
-    // Free allocated memory.
-    free(obs_S); free(obs_I); free(obs_R);
-    free(final_betas);
-    free(final_gammas);
-    free(epsilon_history);
+    free_simulation(observed);
     gsl_rng_free(rng);
-    
     return 0;
 }
