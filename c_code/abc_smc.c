@@ -1,3 +1,15 @@
+/*
+ * SIR Model Simulation
+ * Author: Gabriele Bertinelli
+ * Date: 21-02-2025
+ *
+ * This program simulates the spread of an infectious disease using the SIR model,
+ * using the Sequential Monte Carlo ABC algorithm to infer the parameters of the model.
+ * It uses a simplified version of the resampling methods, without the need for weights.
+ * It gives similar results to the alternative, more correct, version of the same algorithm,
+ * abc_smc_alternative.c.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
